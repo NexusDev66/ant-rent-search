@@ -110,9 +110,86 @@ python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
 - 坐标字段 `geom` 为 PostGIS `geometry(Point,4326)`，存 **WGS84**。前端若用高德/腾讯地图（GCJ02）需先转换。
 - 部分房源坐标待回填，`locate_map` 动作可能只包含部分点位。
 
-## 协作约定
+## 5 分钟上手（新同事）
 
-1. 不要直接改 `main`，从 `dev` 切 `feature/xxx` 分支，改完提 PR。
-2. 改接口字段必须同步更新 `api/API契约.md`。
-3. 提交前确认没把密钥、数据库文件（`*.db`）带上。
-4. 修改模型配置后，用 `验收标准.md` 的 12 题测试集回归一次。
+前提：本机有 Docker 和 Python 3.10+，且仓库管理员已把你加为 collaborator（私有库看不到仓库要先找何安加人）。
+
+```bash
+# 1. 拉代码
+git clone https://github.com/NexusDev66/ant-rent-search.git
+cd ant-rent-search
+
+# 2. 装依赖
+pip install -r requirements.txt
+
+# 3. 起数据库（首次约 1 分钟）
+docker run -d --name ant-rent-pg -p 5433:5432 \
+  -e POSTGRES_DB=antrent -e POSTGRES_USER=antrent -e POSTGRES_PASSWORD=ant_rent_dev \
+  postgis/postgis:16-3.4
+
+# 4. 建表 + 导入 126 条样例（幂等，可重复跑）
+docker exec -i ant-rent-pg psql -U antrent -d antrent < db/schema_pg.sql
+python db/load_seed.py
+
+# 5. 配模型密钥（PowerShell）
+$env:RAG_API_KEY = "向何安索取"
+
+# 6. 起服务
+python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+```
+
+自检（三个都通就算上手完成）：
+
+```bash
+curl http://127.0.0.1:8000/health
+# 期望 {"status":"ok","active_listings":126}
+
+curl "http://127.0.0.1:8000/listings?limit=1"
+
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d "{\"message\":\"2500以下 整租 能养猫\",\"mode\":\"rules\"}"
+# mode=rules 走确定性规则，不消耗模型额度，用来验证「检索链路」是否通
+```
+
+Windows 用 PowerShell 时把 `curl` 换成 `curl.exe`，或直接用浏览器打开 `http://127.0.0.1:8000/docs` 调接口。
+
+常见卡点：
+
+- `/health` 里 `active_listings` 是 0 → 第 4 步没导入成功，重跑 `python db/load_seed.py`。
+- 连不上库 → 端口被占，换 `-p 5434:5432` 并同步改 `PG_DSN`。
+- `/chat` 报模型错误 → `RAG_API_KEY` 没配，先用 `mode:"rules"` 调检索。
+
+## 协作规范
+
+**分支模型**
+
+1. `main` 只保留可运行版本，任何人不得直接推送，一律走 PR。
+2. 从 `main` 切功能分支：`git checkout -b feature/简短说明`（修 bug 用 `fix/简短说明`）。
+3. 完成后 `git push -u origin feature/xxx`，在网页发起 Pull Request，至少一人 review 后合并。
+4. 合并方式统一用 **Squash and merge**，保持 `main` 线性、好回滚。
+5. 分支合并当天删除，避免堆积。
+
+**PR 检查项（发起前自查）**
+
+- 本地能起服务，`/health`、`/listings` 至少各通一次。
+- 改了接口字段/参数 → 同步更新 `api/API契约.md`，否则前端会踩空。
+- 改了模型配置、检索条件、排序逻辑 → 用 `验收标准.md` 的测试集回归一遍。
+- 没有把密钥、`.env`、`*.db`、`data/` 原始数据提交上来（`.gitignore` 已拦，提交前看一眼 `git status`）。
+
+**代码约定**
+
+- 密钥只走环境变量，不写死、不进代码注释。
+- 数据库结构变更只加不改：新增字段给默认值，`schema_pg.sql` 与 `schema.sql` 同步更新，导入脚本保持幂等（可重复执行）。
+- 检索逻辑与模型调用分离：新筛选条件加在 `rag/retrieve.py`，提示词改在 `rag/llm.py`，不要在接口层写业务判断。
+
+**联调约定**
+
+- 后端接口以 `main` 上的 [API契约.md](api/API契约.md) 为准，前端/Dify 侧按此对接；字段有调整提前在 PR 里说明。
+- Dify Chatflow 的搭建与节点参数见 [Dify对接说明.md](api/Dify对接说明.md)，改节点后请把变更点写进该文档。
+- 联调环境共用一套库，不要在里面做删表、批量改数据的实验；需要实验请本地起 Docker。
+
+**沟通**
+
+- 需求/口径问题在 PR 或群里说清楚，不要口头改完不留记录。
+- 发现数据问题（租金异常、字段缺失）提 Issue 并附一条示例 `id`。
